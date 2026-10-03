@@ -1,13 +1,13 @@
 // Молоток — плагин страницы Agents Hub: разбить экран, как в Windows Desktop Destroyer.
-// Кнопка в верхней полосе; в руке молоток — каждый клик оставляет трещину в «стекле» поверх страницы, осколки
-// отлетают, стекло звенит. Esc или «Убрать осколки» — всё как было. Это слой поверх страницы: хаб под ним работает,
-// пока молоток в руке, клики до него не доходят. «Уменьшить движение» — без летящих осколков и тряски.
+// Кнопка в верхней полосе; в руке — нарисованный молоток (hammer.svg): ходит за курсором, при клике замахивается и бьёт
+// бойком точно в точку — там трещина в «стекле», крошево, отлетающие осколки, звон. Esc или «Убрать осколки» — всё
+// как было. Это слой поверх страницы: хаб под ним работает, пока молоток в руке, клики до него не доходят.
+// «Уменьшить движение» — без замаха, летящих осколков и тряски.
 
-const HAMMER = encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40"><g transform="rotate(-38 20 20)">' +
-  '<rect x="18" y="14" width="4" height="23" rx="2" fill="#b07a46" stroke="#000" stroke-opacity=".35"/>' +
-  '<rect x="8" y="7" width="24" height="9" rx="2.5" fill="#8c98a8" stroke="#000" stroke-opacity=".45"/>' +
-  '<rect x="8" y="7" width="24" height="4" rx="2" fill="#c3ccd8"/></g></svg>');
+const HAMMER_URL = new URL("hammer.svg", import.meta.url).href;
+// в hammer.svg (128×96): боёк — низ головки (21, 72), ось замаха — конец рукояти (110, 46)
+const SCALE = 1.4;  // в руке молоток крупнее рисунка — рядом с трещинами во весь экран
+const FACE = [28 * SCALE, 72 * SCALE], PIVOT = [110 * SCALE, 46 * SCALE], REST = -32, STRIKE = 0;
 const ICON = '<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" ' +
   'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 3.5l5 5-2.5 2.5-5-5z"/>' +
   '<path d="M9 6l-6.5 6.5a1.4 1.4 0 0 0 2 2L11 8"/></svg>';
@@ -78,6 +78,13 @@ function crack(ctx, x, y, size) {
     });
     stroke(p, 0.7);
   }
+  for (let i = 0; i < 40; i++) {  // крошево у точки удара
+    const a = rnd(0, Math.PI * 2), r0 = rnd(2, size * 0.07), r1 = r0 + rnd(3, 9);
+    const p = new Path2D();
+    p.moveTo(x + Math.cos(a) * r0, y + Math.sin(a) * r0);
+    p.lineTo(x + Math.cos(a + rnd(-0.3, 0.3)) * r1, y + Math.sin(a + rnd(-0.3, 0.3)) * r1);
+    stroke(p, 0.6);
+  }
   const g = ctx.createRadialGradient(x, y, 0, x, y, size * 0.12);
   g.addColorStop(0, "rgba(255,255,255,.85)"); g.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, size * 0.12, 0, Math.PI * 2); ctx.fill();
@@ -102,7 +109,9 @@ function shards(fx, x, y) {
       p.vy += 0.35; p.x += p.vx; p.y += p.vy; p.r += p.vr; p.life -= 0.018; alive++;
       ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.globalAlpha = Math.max(0, p.life);
       ctx.beginPath(); ctx.moveTo(0, -p.s); ctx.lineTo(p.s * 0.8, p.s * 0.6); ctx.lineTo(-p.s * 0.7, p.s * 0.5); ctx.closePath();
-      ctx.fillStyle = "rgba(220,232,250,.5)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 0.8; ctx.stroke();
+      const sh = ctx.createLinearGradient(-p.s, -p.s, p.s, p.s);
+      sh.addColorStop(0, "rgba(255,255,255,.75)"); sh.addColorStop(0.5, "rgba(200,220,245,.35)"); sh.addColorStop(1, "rgba(150,180,220,.55)");
+      ctx.fillStyle = sh; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 0.8; ctx.stroke();
       ctx.restore();
     }
     if (alive && layer) requestAnimationFrame(tick); else ctx.clearRect(0, 0, fx.width, fx.height);
@@ -144,9 +153,19 @@ function open(button, hub) {
   layer = document.createElement("div");
   layer.setAttribute("role", "dialog");
   layer.setAttribute("aria-label", "Молоток: щёлкайте по экрану, Esc — убрать осколки");
-  Object.assign(layer.style, { position: "fixed", inset: "0", zIndex: "2147483000",
-    cursor: `url("data:image/svg+xml,${HAMMER}") 10 10, crosshair`, touchAction: "none" });
+  Object.assign(layer.style, { position: "fixed", inset: "0", zIndex: "2147483000", cursor: "none", touchAction: "none",
+    background: "linear-gradient(135deg, rgba(200,225,255,.05), rgba(255,255,255,0) 40%, rgba(200,225,255,.04))" });
   const glass = canvas(), fx = canvas();
+  const hammer = new Image();
+  hammer.src = HAMMER_URL;
+  hammer.alt = "";
+  hammer.draggable = false;
+  Object.assign(hammer.style, { position: "absolute", left: "0", top: "0", width: `${128 * SCALE}px`, height: `${96 * SCALE}px`,
+    pointerEvents: "none", transformOrigin: `${PIVOT[0]}px ${PIVOT[1]}px`, transform: `rotate(${REST}deg)`,
+    filter: "drop-shadow(6px 10px 6px rgba(0,0,0,.35))", willChange: "transform, left, top" });
+  const place = (x, y) => { hammer.style.left = `${x - FACE[0]}px`; hammer.style.top = `${y - FACE[1]}px`; };
+  place(innerWidth / 2, innerHeight / 2);
+  layer.addEventListener("pointermove", (e) => place(e.clientX, e.clientY));
   const bar = hub.el("div");
   Object.assign(bar.style, { position: "absolute", top: "12px", right: "12px", display: "flex", gap: "8px",
     padding: "6px", borderRadius: "10px", background: "var(--card, #fff)", boxShadow: "0 8px 24px rgba(0,0,0,.25)",
@@ -158,15 +177,32 @@ function open(button, hub) {
   Object.assign(hint.style, { alignSelf: "center", fontSize: "12px", color: "var(--muted-foreground, #666)", padding: "0 6px" });
   bar.append(hint, done);
   bar.addEventListener("pointerdown", (e) => e.stopPropagation());
-  layer.append(glass, fx, bar);
-  let hits = 0;
-  layer.addEventListener("pointerdown", (e) => {
+  layer.append(glass, fx, hammer, bar);
+  let hits = 0, swing = null, pending = null;
+  const hit = (x, y) => {
     hits++;
     const size = Math.min(innerWidth, innerHeight) * rnd(0.32, 0.5);
-    crack(glass.getContext("2d"), e.clientX, e.clientY, size);
-    shards(fx, e.clientX, e.clientY);
+    crack(glass.getContext("2d"), x, y, size);
+    shards(fx, x, y);
     shatterSound(Math.min(1, 0.6 + hits * 0.05));
     shake();
+  };
+  layer.addEventListener("pointerdown", (e) => {
+    const x = e.clientX, y = e.clientY;
+    place(x, y);
+    if (calm()) return hit(x, y);
+    if (swing) {  // частые клики — каждый бьёт, без ожидания замаха; прерванный замах сначала бьёт свою точку
+      if (pending) { clearTimeout(pending.timer); hit(pending.x, pending.y); pending = null; }
+      swing.cancel();
+      return hit(x, y);
+    }
+    // замах: чуть назад, удар вниз в точку, отскок — трещина в момент касания бойком
+    swing = hammer.animate([{ transform: `rotate(${REST}deg)` }, { transform: `rotate(${REST - 10}deg)`, offset: 0.25 },
+      { transform: `rotate(${STRIKE}deg)`, offset: 0.55 }, { transform: `rotate(${STRIKE - 6}deg)`, offset: 0.7 },
+      { transform: `rotate(${REST}deg)` }], { duration: 300, easing: "ease-in" });
+    const mine = swing;
+    pending = { x, y, timer: setTimeout(() => { pending = null; hit(x, y); }, 165) };
+    mine.onfinish = mine.oncancel = () => { if (swing === mine) swing = null; };
   });
   document.addEventListener("keydown", onKey, true);
   document.body.append(layer);
