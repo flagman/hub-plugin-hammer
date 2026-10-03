@@ -1,23 +1,24 @@
-// Молоток — плагин страницы Agents Hub: разбить экран, как в Windows Desktop Destroyer.
-// Кнопка в верхней полосе; в руке — нарисованный молоток (hammer.svg): ходит за курсором, при клике замахивается и бьёт
-// бойком точно в точку — там трещина в «стекле», крошево, отлетающие осколки, звон. Esc или «Убрать осколки» — всё
-// как было. Это слой поверх страницы: хаб под ним работает, пока молоток в руке, клики до него не доходят.
-// «Уменьшить движение» — без замаха, летящих осколков и тряски.
+// Молоток — плагин страницы Agents Hub в духе Desktop Destroyer / Desktop Toys: молоток-спрайт у курсора, клик —
+// три кадра удара (замах, смазанный взмах, удар), в точке удара — спрайт пробоины в стекле (дыра, крошево, трещины),
+// отлетают осколки, звенит стекло. Esc или «Убрать осколки» — всё как было. Это слой поверх страницы: хаб под ним
+// работает, пока молоток в руке, клики до него не доходят. «Уменьшить движение» — без кадров взмаха и осколков.
+// hammer.png — 3D-иконка «hammer» от Icons8 (https://icons8.com, 3D Fluency).
 
-const HAMMER_URL = new URL("hammer.svg", import.meta.url).href;
-// в hammer.svg (128×96): боёк — низ головки (21, 72), ось замаха — конец рукояти (110, 46)
-const SCALE = 1.4;  // в руке молоток крупнее рисунка — рядом с трещинами во весь экран
-const FACE = [28 * SCALE, 72 * SCALE], PIVOT = [110 * SCALE, 46 * SCALE], REST = -32, STRIKE = 0;
+const HAMMER_URL = new URL("hammer.png", import.meta.url).href;
+const SRC = 376;                    // hammer.png — 376×376
+const FACE = [300, 200], PIVOT = [55, 305];   // боёк и конец рукояти на рисунке
+const SIZE = 120;                   // молоток на экране, px
+const FRAMES = [-48, -20, 0];       // кадры удара: угол рукояти, градусы (0 — боёк в точке)
+const FRAME_MS = 45;
 const ICON = '<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" ' +
   'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 3.5l5 5-2.5 2.5-5-5z"/>' +
   '<path d="M9 6l-6.5 6.5a1.4 1.4 0 0 0 2 2L11 8"/></svg>';
 
 const calm = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-let layer = null;
+const rnd = (a, b) => a + Math.random() * (b - a);
+let layer = null, current = null;
 
-function rnd(a, b) { return a + Math.random() * (b - a); }
-
-// --- звон стекла: шум с полосовым фильтром и затуханием + несколько высоких «тинь» ---------------------------------
+// --- звон стекла: шум с полосовым фильтром и затуханием, глухой удар, несколько высоких «тинь» -----------------------
 let audio = null;
 function shatterSound(power) {
   try {
@@ -26,9 +27,13 @@ function shatterSound(power) {
     const buf = audio.createBuffer(1, len, audio.sampleRate), d = buf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
     const src = audio.createBufferSource(), bp = audio.createBiquadFilter(), g = audio.createGain();
-    src.buffer = buf; bp.type = "bandpass"; bp.frequency.value = 3200; bp.Q.value = 0.7;
-    g.gain.setValueAtTime(0.5 * power, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+    src.buffer = buf; bp.type = "bandpass"; bp.frequency.value = 3000; bp.Q.value = 0.7;
+    g.gain.setValueAtTime(0.55 * power, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
     src.connect(bp).connect(g).connect(audio.destination); src.start(t);
+    const thud = audio.createOscillator(), tg = audio.createGain();
+    thud.type = "triangle"; thud.frequency.setValueAtTime(180, t); thud.frequency.exponentialRampToValueAtTime(60, t + 0.12);
+    tg.gain.setValueAtTime(0.35 * power, t); tg.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    thud.connect(tg).connect(audio.destination); thud.start(t); thud.stop(t + 0.16);
     for (let k = 0; k < 5; k++) {
       const o = audio.createOscillator(), og = audio.createGain(), at = t + rnd(0.02, 0.3);
       o.type = "sine"; o.frequency.value = rnd(2400, 6200);
@@ -39,65 +44,63 @@ function shatterSound(power) {
   } catch { /* без звука — тоже разбито */ }
 }
 
-// --- трещина: лучи с изломами и ветками, «паутинка» между ними, белая вспышка в точке удара ---------------------------
-function crack(ctx, x, y, size) {
-  const rays = Math.round(rnd(9, 15)), ends = [];
-  ctx.save();
+// --- спрайты пробоин: рисуются один раз, при ударе — штамп случайного с поворотом -----------------------------------
+function decal(px) {
+  const c = document.createElement("canvas");
+  c.width = c.height = px;
+  const ctx = c.getContext("2d"), m = px / 2;
   ctx.lineCap = "round"; ctx.lineJoin = "round";
-  const stroke = (path, w) => {
-    ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = w + 1.2; ctx.stroke(path);
-    ctx.strokeStyle = "rgba(235,242,255,.92)"; ctx.lineWidth = w; ctx.stroke(path);
+  const line = (pts, w) => {
+    const draw = (dx, dy, color, lw) => {
+      ctx.beginPath(); ctx.moveTo(pts[0][0] + dx, pts[0][1] + dy);
+      for (const [x, y] of pts.slice(1)) ctx.lineTo(x + dx, y + dy);
+      ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+    };
+    draw(1, 1.2, "rgba(0,0,0,.55)", w + 1);
+    draw(0, 0, "rgba(240,247,255,.95)", w);
   };
+  const rays = Math.round(rnd(10, 16));  // трещины от центра: изломанные лучи с ветками
   for (let r = 0; r < rays; r++) {
-    const base = (r / rays) * Math.PI * 2 + rnd(-0.25, 0.25), len = size * rnd(0.45, 1.15);
-    const path = new Path2D(), pts = [[x, y]];
-    let a = base, px = x, py = y, done = 0;
-    path.moveTo(x, y);
-    while (done < len) {
-      const step = rnd(14, 34);
-      a += rnd(-0.28, 0.28);
-      px += Math.cos(a) * step; py += Math.sin(a) * step; done += step;
-      path.lineTo(px, py); pts.push([px, py]);
-      if (Math.random() < 0.18) {  // ветка
-        const b = new Path2D(); let bx = px, by = py, ba = a + rnd(-0.9, 0.9);
-        b.moveTo(bx, by);
-        for (let s = 0; s < 3; s++) { bx += Math.cos(ba) * rnd(10, 26); by += Math.sin(ba) * rnd(10, 26); ba += rnd(-0.4, 0.4); b.lineTo(bx, by); }
-        stroke(b, 0.8);
-      }
+    let a = (r / rays) * Math.PI * 2 + rnd(-0.2, 0.2), x = m, y = m;
+    const pts = [[x, y]], len = m * rnd(0.55, 0.98);
+    for (let d = 0; d < len;) {
+      const s = rnd(6, 14); a += rnd(-0.3, 0.3); x += Math.cos(a) * s; y += Math.sin(a) * s; d += s; pts.push([x, y]);
+      if (Math.random() < 0.15) line([[x, y], [x + Math.cos(a + 0.8) * rnd(6, 16), y + Math.sin(a + 0.8) * rnd(6, 16)]], 0.7);
     }
-    stroke(path, done > size * 0.8 ? 1.4 : 1.1);
-    ends.push(pts);
+    line(pts, r % 3 ? 0.9 : 1.4);
   }
-  for (const ring of [0.18, 0.34, 0.55]) {  // паутинка: дуги между соседними лучами
-    const p = new Path2D();
-    ends.forEach((pts, i) => {
-      const next = ends[(i + 1) % ends.length];
-      const a = pts[Math.min(pts.length - 1, Math.round(pts.length * ring))];
-      const b = next[Math.min(next.length - 1, Math.round(next.length * ring))];
-      if (Math.random() < 0.8) { p.moveTo(a[0], a[1]); p.quadraticCurveTo((a[0] + b[0]) / 2 + rnd(-6, 6), (a[1] + b[1]) / 2 + rnd(-6, 6), b[0], b[1]); }
-    });
-    stroke(p, 0.7);
+  for (const k of [0.3, 0.5]) {  // кольца-паутинка
+    ctx.beginPath();
+    for (let i = 0; i <= 24; i++) {
+      const a = (i / 24) * Math.PI * 2, rr = m * k * rnd(0.85, 1.12);
+      if (i === 0 || Math.random() < 0.25) ctx.moveTo(m + Math.cos(a) * rr, m + Math.sin(a) * rr);
+      else ctx.lineTo(m + Math.cos(a) * rr, m + Math.sin(a) * rr);
+    }
+    ctx.strokeStyle = "rgba(240,247,255,.7)"; ctx.lineWidth = 0.8; ctx.stroke();
   }
-  for (let i = 0; i < 40; i++) {  // крошево у точки удара
-    const a = rnd(0, Math.PI * 2), r0 = rnd(2, size * 0.07), r1 = r0 + rnd(3, 9);
-    const p = new Path2D();
-    p.moveTo(x + Math.cos(a) * r0, y + Math.sin(a) * r0);
-    p.lineTo(x + Math.cos(a + rnd(-0.3, 0.3)) * r1, y + Math.sin(a + rnd(-0.3, 0.3)) * r1);
-    stroke(p, 0.6);
+  for (let i = 0; i < 70; i++) {  // крошево
+    const a = rnd(0, Math.PI * 2), r0 = rnd(m * 0.08, m * 0.24), r1 = r0 + rnd(3, 8), b = a + rnd(-0.4, 0.4);
+    line([[m + Math.cos(a) * r0, m + Math.sin(a) * r0], [m + Math.cos(b) * r1, m + Math.sin(b) * r1]], 0.6);
   }
-  const g = ctx.createRadialGradient(x, y, 0, x, y, size * 0.12);
-  g.addColorStop(0, "rgba(255,255,255,.85)"); g.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, size * 0.12, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
+  ctx.beginPath();  // дыра: рваный край, тёмная глубина, блик по кромке
+  for (let i = 0, n = 14; i < n; i++) {
+    const a = (i / n) * Math.PI * 2, rr = m * rnd(0.07, 0.14), x = m + Math.cos(a) * rr, y = m + Math.sin(a) * rr;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+  const g = ctx.createRadialGradient(m - 2, m - 2, 1, m, m, m * 0.14);
+  g.addColorStop(0, "rgba(5,6,8,.95)"); g.addColorStop(0.7, "rgba(25,28,34,.9)"); g.addColorStop(1, "rgba(80,90,105,.85)");
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.2; ctx.stroke();
+  return c;
 }
 
-// --- осколки: треугольники летят и падают ---------------------------------------------------------------------------
+// --- осколки: треугольники с бликом летят и падают ------------------------------------------------------------------
 function shards(fx, x, y) {
   if (calm()) return;
-  const parts = Array.from({ length: Math.round(rnd(14, 24)) }, () => {
-    const a = rnd(0, Math.PI * 2), v = rnd(2, 9);
-    return { x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - rnd(1, 4), r: rnd(0, 6.3), vr: rnd(-0.3, 0.3),
-      s: rnd(3, 10), life: 1 };
+  const parts = Array.from({ length: Math.round(rnd(12, 20)) }, () => {
+    const a = rnd(0, Math.PI * 2), v = rnd(2, 8);
+    return { x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - rnd(1, 4), r: rnd(0, 6.3), vr: rnd(-0.3, 0.3), s: rnd(3, 9), life: 1 };
   });
   const ctx = fx.getContext("2d"), dpr = devicePixelRatio || 1;
   const tick = () => {
@@ -106,11 +109,11 @@ function shards(fx, x, y) {
     let alive = 0;
     for (const p of parts) {
       if (p.life <= 0) continue;
-      p.vy += 0.35; p.x += p.vx; p.y += p.vy; p.r += p.vr; p.life -= 0.018; alive++;
+      p.vy += 0.35; p.x += p.vx; p.y += p.vy; p.r += p.vr; p.life -= 0.02; alive++;
       ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.globalAlpha = Math.max(0, p.life);
       ctx.beginPath(); ctx.moveTo(0, -p.s); ctx.lineTo(p.s * 0.8, p.s * 0.6); ctx.lineTo(-p.s * 0.7, p.s * 0.5); ctx.closePath();
       const sh = ctx.createLinearGradient(-p.s, -p.s, p.s, p.s);
-      sh.addColorStop(0, "rgba(255,255,255,.75)"); sh.addColorStop(0.5, "rgba(200,220,245,.35)"); sh.addColorStop(1, "rgba(150,180,220,.55)");
+      sh.addColorStop(0, "rgba(255,255,255,.8)"); sh.addColorStop(1, "rgba(150,180,220,.5)");
       ctx.fillStyle = sh; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 0.8; ctx.stroke();
       ctx.restore();
     }
@@ -119,18 +122,24 @@ function shards(fx, x, y) {
   requestAnimationFrame(tick);
 }
 
-function shake() {
-  if (calm()) return;
-  document.body.animate([{ transform: "translate(0,0)" }, { transform: `translate(${rnd(-6, 6)}px,${rnd(-5, 5)}px)` },
-    { transform: `translate(${rnd(-4, 4)}px,${rnd(-3, 3)}px)` }, { transform: "translate(0,0)" }], { duration: 160, easing: "ease-out" });
-}
-
 function canvas() {
   const c = document.createElement("canvas"), dpr = devicePixelRatio || 1;
   c.width = innerWidth * dpr; c.height = innerHeight * dpr;
-  Object.assign(c.style, { position: "absolute", inset: "0", width: "100%", height: "100%" });
+  Object.assign(c.style, { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none" });
   c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
   return c;
+}
+
+// --- молоток-спрайт: кадр с углом рукояти; при угле 0 боёк — в точке (x, y) -----------------------------------------
+function drawHammer(ctx, img, x, y, angle, ghost) {
+  const k = SIZE / SRC, deg = (angle * Math.PI) / 180;
+  const px = PIVOT[0] * k, py = PIVOT[1] * k, fx = FACE[0] * k, fy = FACE[1] * k;
+  ctx.save();
+  ctx.globalAlpha = ghost || 1;
+  ctx.translate(x + (px - fx), y + (py - fy)); ctx.rotate(deg); ctx.translate(-px, -py);
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 8; ctx.shadowOffsetX = 5; ctx.shadowOffsetY = 8;
+  ctx.drawImage(img, 0, 0, SIZE, SIZE);
+  ctx.restore();
 }
 
 function close(button) {
@@ -143,7 +152,6 @@ function close(button) {
   else l.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: "ease-out" }).onfinish = () => l.remove();
 }
 
-let current = null;
 function onKey(e) { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(current); } }
 
 function open(button, hub) {
@@ -154,18 +162,23 @@ function open(button, hub) {
   layer.setAttribute("role", "dialog");
   layer.setAttribute("aria-label", "Молоток: щёлкайте по экрану, Esc — убрать осколки");
   Object.assign(layer.style, { position: "fixed", inset: "0", zIndex: "2147483000", cursor: "none", touchAction: "none",
-    background: "linear-gradient(135deg, rgba(200,225,255,.05), rgba(255,255,255,0) 40%, rgba(200,225,255,.04))" });
-  const glass = canvas(), fx = canvas();
-  const hammer = new Image();
-  hammer.src = HAMMER_URL;
-  hammer.alt = "";
-  hammer.draggable = false;
-  Object.assign(hammer.style, { position: "absolute", left: "0", top: "0", width: `${128 * SCALE}px`, height: `${96 * SCALE}px`,
-    pointerEvents: "none", transformOrigin: `${PIVOT[0]}px ${PIVOT[1]}px`, transform: `rotate(${REST}deg)`,
-    filter: "drop-shadow(6px 10px 6px rgba(0,0,0,.35))", willChange: "transform, left, top" });
-  const place = (x, y) => { hammer.style.left = `${x - FACE[0]}px`; hammer.style.top = `${y - FACE[1]}px`; };
-  place(innerWidth / 2, innerHeight / 2);
-  layer.addEventListener("pointermove", (e) => place(e.clientX, e.clientY));
+    overflow: "hidden" });
+  const glass = canvas(), fx = canvas(), hand = canvas();
+  const img = new Image();
+  img.src = HAMMER_URL;
+  const decals = Array.from({ length: 5 }, () => decal(220));
+
+  let mx = innerWidth / 2, my = innerHeight / 2, angle = FRAMES[0], trail = [];
+  const paint = () => {
+    const ctx = hand.getContext("2d");
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    if (!img.complete || !img.naturalWidth) return;
+    for (const [a, alpha] of trail) drawHammer(ctx, img, mx, my, a, alpha);  // смазанный след взмаха
+    drawHammer(ctx, img, mx, my, angle);
+  };
+  img.onload = paint;
+  layer.addEventListener("pointermove", (e) => { mx = e.clientX; my = e.clientY; paint(); });
+
   const bar = hub.el("div");
   Object.assign(bar.style, { position: "absolute", top: "12px", right: "12px", display: "flex", gap: "8px",
     padding: "6px", borderRadius: "10px", background: "var(--card, #fff)", boxShadow: "0 8px 24px rgba(0,0,0,.25)",
@@ -173,39 +186,41 @@ function open(button, hub) {
   const done = hub.el("button", "btn small", "Убрать осколки");
   done.type = "button";
   done.addEventListener("click", (e) => { e.stopPropagation(); close(button); });
-  const hint = hub.el("span", null, "Щёлкайте по экрану · Esc");
+  const hint = hub.el("span", null, "Бейте молотком · Esc");
   Object.assign(hint.style, { alignSelf: "center", fontSize: "12px", color: "var(--muted-foreground, #666)", padding: "0 6px" });
   bar.append(hint, done);
   bar.addEventListener("pointerdown", (e) => e.stopPropagation());
-  layer.append(glass, fx, hammer, bar);
-  let hits = 0, swing = null, pending = null;
-  const hit = (x, y) => {
+  layer.append(glass, fx, hand, bar);
+
+  let hits = 0, busy = null;
+  const strike = (x, y) => {
     hits++;
-    const size = Math.min(innerWidth, innerHeight) * rnd(0.32, 0.5);
-    crack(glass.getContext("2d"), x, y, size);
+    const d = decals[Math.floor(Math.random() * decals.length)], s = rnd(0.75, 1.25), ctx = glass.getContext("2d");
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rnd(0, Math.PI * 2)); ctx.scale(s, s);
+    ctx.drawImage(d, -d.width / 2, -d.height / 2);
+    ctx.restore();
     shards(fx, x, y);
     shatterSound(Math.min(1, 0.6 + hits * 0.05));
-    shake();
   };
   layer.addEventListener("pointerdown", (e) => {
-    const x = e.clientX, y = e.clientY;
-    place(x, y);
-    if (calm()) return hit(x, y);
-    if (swing) {  // частые клики — каждый бьёт, без ожидания замаха; прерванный замах сначала бьёт свою точку
-      if (pending) { clearTimeout(pending.timer); hit(pending.x, pending.y); pending = null; }
-      swing.cancel();
-      return hit(x, y);
-    }
-    // замах: чуть назад, удар вниз в точку, отскок — трещина в момент касания бойком
-    swing = hammer.animate([{ transform: `rotate(${REST}deg)` }, { transform: `rotate(${REST - 10}deg)`, offset: 0.25 },
-      { transform: `rotate(${STRIKE}deg)`, offset: 0.55 }, { transform: `rotate(${STRIKE - 6}deg)`, offset: 0.7 },
-      { transform: `rotate(${REST}deg)` }], { duration: 300, easing: "ease-in" });
-    const mine = swing;
-    pending = { x, y, timer: setTimeout(() => { pending = null; hit(x, y); }, 165) };
-    mine.onfinish = mine.oncancel = () => { if (swing === mine) swing = null; };
+    mx = e.clientX; my = e.clientY;
+    const x = mx, y = my;
+    if (busy) { clearTimeout(busy.timer); busy.finish(); }  // частые клики — каждый бьёт
+    if (calm()) { angle = FRAMES[2]; paint(); strike(x, y); setTimeout(() => { angle = FRAMES[0]; paint(); }, 120); return; }
+    let i = 0, struck = false;
+    const back = () => { trail = []; angle = FRAMES[0]; paint(); busy = null; };
+    const step = () => {
+      trail = i === 1 ? [[FRAMES[0], 0.25]] : i === 2 ? [[FRAMES[0], 0.15], [FRAMES[1], 0.3]] : [];
+      angle = FRAMES[i]; paint();
+      if (i === FRAMES.length - 1) { struck = true; strike(x, y); busy.timer = setTimeout(back, 110); return; }
+      i++; busy.timer = setTimeout(step, FRAME_MS);
+    };
+    busy = { timer: 0, finish: () => { if (!struck) strike(x, y); back(); } };
+    step();
   });
   document.addEventListener("keydown", onKey, true);
   document.body.append(layer);
+  paint();
   done.focus();
 }
 
